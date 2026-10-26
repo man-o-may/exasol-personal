@@ -5,8 +5,20 @@ package localinstall
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 )
+
+// ContainerEngine names the container engine a local deployment runs on.
+type ContainerEngine string
+
+const (
+	EnginePodman ContainerEngine = "podman"
+	EngineDocker ContainerEngine = "docker"
+)
+
+var ErrUnsupportedContainerEngine = errors.New("unsupported container engine")
 
 // ContainerRuntime holds every container operation the launcher performs, so
 // no caller above it carries a backend's vocabulary.
@@ -14,6 +26,8 @@ import (
 //nolint:interfacebloat // The surface is as wide as the launcher's use.
 type ContainerRuntime interface {
 	Create(ctx context.Context, spec ContainerSpec, out, outErr io.Writer) error
+	// RunToCompletion runs a container in the foreground and removes it after it exits.
+	RunToCompletion(ctx context.Context, spec ContainerSpec, out, outErr io.Writer) error
 	Remove(ctx context.Context, name string, force bool, out, outErr io.Writer) error
 	Stop(ctx context.Context, name string, out, outErr io.Writer) error
 	Rename(ctx context.Context, from, to string, out, outErr io.Writer) error
@@ -43,6 +57,22 @@ type ContainerRuntime interface {
 		ctx context.Context, network, container string, aliases []string, out, outErr io.Writer,
 	) error
 	RemoveNetwork(ctx context.Context, name string, out, outErr io.Writer) error
+}
+
+// NewContainerRuntime returns the runtime that drives engine through
+// environment.
+func NewContainerRuntime(
+	engine ContainerEngine,
+	environment CommandRunner,
+) (ContainerRuntime, error) {
+	switch engine {
+	case EnginePodman:
+		return newPodmanRuntime(environment), nil
+	case EngineDocker:
+		return newDockerRuntime(environment), nil
+	default:
+		return nil, fmt.Errorf("%w %q", ErrUnsupportedContainerEngine, engine)
+	}
 }
 
 type ContainerFilter struct {

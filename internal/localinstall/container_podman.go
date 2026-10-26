@@ -32,16 +32,44 @@ type podmanRuntime struct {
 	// Decides which host the container runtime runs on.
 	environment CommandRunner
 	binary      string
+	dialect     cliDialect
+}
+
+// cliDialect holds where a Podman-compatible CLI spells a container spec
+// differently.
+type cliDialect struct {
+	replaceFlag         bool
+	jsonEntrypoint      bool
+	writableImageMounts bool
+	nestedSandbox       []string
+}
+
+var podmanDialect = cliDialect{
+	replaceFlag:         true,
+	jsonEntrypoint:      true,
+	writableImageMounts: true,
+	nestedSandbox:       []string{"unmask=ALL"},
 }
 
 func newPodmanRuntime(environment CommandRunner) ContainerRuntime {
-	return podmanRuntime{environment: environment, binary: podmanBinary}
+	return podmanRuntime{environment: environment, binary: podmanBinary, dialect: podmanDialect}
 }
 
 func (runtime podmanRuntime) Create(
 	ctx context.Context, spec ContainerSpec, out, outErr io.Writer,
 ) error {
-	args, err := podmanCreateArgs(spec)
+	args, err := createArgs(spec, runtime.dialect, true)
+	if err != nil {
+		return err
+	}
+
+	return runtime.run(ctx, out, outErr, args...)
+}
+
+func (runtime podmanRuntime) RunToCompletion(
+	ctx context.Context, spec ContainerSpec, out, outErr io.Writer,
+) error {
+	args, err := createArgs(spec, runtime.dialect, false)
 	if err != nil {
 		return err
 	}
@@ -375,22 +403,32 @@ func podmanRestartPolicy(policy RestartPolicy) (string, bool) {
 	}
 }
 
-func podmanCreateArgs(spec ContainerSpec) ([]string, error) {
+// createArgs starts the container detached, or otherwise in the foreground
+// and removes it once it exits.
+func createArgs(spec ContainerSpec, dialect cliDialect, detach bool) ([]string, error) {
 	args := []string{"run", "--detach"}
-	args = podmanIdentityArgs(args, spec)
-	args = podmanResourceArgs(args, spec)
+	if !detach {
+		args = []string{"run", "--rm"}
+	}
+	args = podmanIdentityArgs(args, spec, dialect)
+	args = podmanResourceArgs(args, spec, dialect)
 	args = podmanNetworkArgs(args, spec)
-	args = podmanStorageArgs(args, spec)
-	args, err := podmanExecutionArgs(args, spec)
+	args = podmanStorageArgs(args, spec, dialect)
+	args, err := podmanExecutionArgs(args, spec, dialect)
 	if err != nil {
 		return nil, err
 	}
+	args = append(args, spec.Image)
+	if !dialect.jsonEntrypoint && len(spec.Entrypoint) > 1 {
+		// The flag names only the executable, so its arguments follow the image.
+		args = append(args, spec.Entrypoint[1:]...)
+	}
 
-	return append(append(args, spec.Image), spec.Args...), nil
+	return append(args, spec.Args...), nil
 }
 
-func podmanIdentityArgs(args []string, spec ContainerSpec) []string {
-	if spec.Replace {
+func podmanIdentityArgs(args []string, spec ContainerSpec, dialect cliDialect) []string {
+	if spec.Replace && dialect.replaceFlag {
 		args = append(args, "--replace")
 	}
 	if spec.Name != "" {
@@ -409,14 +447,18 @@ func podmanIdentityArgs(args []string, spec ContainerSpec) []string {
 	return args
 }
 
-func podmanResourceArgs(args []string, spec ContainerSpec) []string {
+func podmanResourceArgs(args []string, spec ContainerSpec, dialect cliDialect) []string {
 	if spec.SharedMemorySize != "" {
 		args = append(args, "--shm-size="+spec.SharedMemorySize)
 	}
 	if spec.ProcessLimit != "" && goruntime.GOOS != "windows" {
 		args = append(args, "--pids-limit="+spec.ProcessLimit)
 	}
-	for _, option := range spec.SecurityOptions {
+	options := spec.SecurityOptions
+	if spec.NestedSandbox {
+		options = append(slices.Clone(dialect.nestedSandbox), options...)
+	}
+	for _, option := range options {
 		args = append(args, "--security-opt", option)
 	}
 
@@ -437,10 +479,10 @@ func podmanNetworkArgs(args []string, spec ContainerSpec) []string {
 	return args
 }
 
-func podmanStorageArgs(args []string, spec ContainerSpec) []string {
+func podmanStorageArgs(args []string, spec ContainerSpec, dialect cliDialect) []string {
 	for _, mount := range spec.Mounts {
 		if mount.Kind == MountImage {
-			args = append(args, "--mount", mount.encode())
+			args = append(args, "--mount", mount.encodeImage(dialect.writableImageMounts))
 
 			continue
 		}
@@ -450,14 +492,19 @@ func podmanStorageArgs(args []string, spec ContainerSpec) []string {
 	return args
 }
 
-func podmanExecutionArgs(args []string, spec ContainerSpec) ([]string, error) {
+func podmanExecutionArgs(
+	args []string, spec ContainerSpec, dialect cliDialect,
+) ([]string, error) {
 	for _, key := range slices.Sorted(maps.Keys(spec.Env)) {
 		args = append(args, "--env", key+"="+spec.Env[key])
 	}
 	if spec.EnvFile != "" {
 		args = append(args, "--env-file", spec.EnvFile)
 	}
-	if len(spec.Entrypoint) > 0 {
+	if len(spec.Entrypoint) > 0 && !dialect.jsonEntrypoint {
+		args = append(args, "--entrypoint", spec.Entrypoint[0])
+	}
+	if len(spec.Entrypoint) > 0 && dialect.jsonEntrypoint {
 		entrypoint, err := json.Marshal(spec.Entrypoint)
 		if err != nil {
 			return nil, err
@@ -589,6 +636,9 @@ func parseLoadedImage(output string) (string, error) {
 	for line := range strings.SplitSeq(output, "\n") {
 		_, image, found := strings.Cut(line, loadedImagePrefix)
 		if !found {
+			_, image, found = strings.Cut(line, loadedImageIDPrefix)
+		}
+		if !found {
 			continue
 		}
 		image = strings.TrimSpace(image)
@@ -624,13 +674,19 @@ func (port PortMapping) encode() string {
 	return published + "/" + protocol
 }
 
-func (mount Mount) encode() string {
-	if mount.Kind == MountImage {
-		return fmt.Sprintf(
-			"type=image,source=%s,destination=%s,rw=%t",
-			mount.Source, mount.Target, mount.Writable,
-		)
+// encodeImage omits the writable flag where the runtime cannot honor it.
+func (mount Mount) encodeImage(writable bool) string {
+	if !writable {
+		return fmt.Sprintf("type=image,source=%s,destination=%s", mount.Source, mount.Target)
 	}
+
+	return fmt.Sprintf(
+		"type=image,source=%s,destination=%s,rw=%t",
+		mount.Source, mount.Target, mount.Writable,
+	)
+}
+
+func (mount Mount) encode() string {
 	options := ""
 	if mount.ReadOnly {
 		options = ":ro"

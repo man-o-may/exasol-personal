@@ -21,7 +21,7 @@ var nanoTLSFiles = []string{
 	filepath.Join("certificates", "privkey.pem"),
 }
 
-func (install *PodmanInstall) recoverIncompleteInitialCreate(
+func (install *NanoInstall) recoverIncompleteInitialCreate(
 	ctx context.Context,
 	out, outErr io.Writer,
 	containerName, dataDir string,
@@ -67,7 +67,7 @@ func (install *PodmanInstall) recoverIncompleteInitialCreate(
 	return true, nil
 }
 
-func (install *PodmanInstall) nextQuarantinePath(
+func (install *NanoInstall) nextQuarantinePath(
 	ctx context.Context,
 	dataDir string,
 	now time.Time,
@@ -86,7 +86,7 @@ func (install *PodmanInstall) nextQuarantinePath(
 	}
 }
 
-func (install *PodmanInstall) removeStaleNanoTLSFiles(
+func (install *NanoInstall) removeStaleNanoTLSFiles(
 	ctx context.Context,
 	dataDir string,
 ) error {

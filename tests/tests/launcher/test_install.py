@@ -317,9 +317,9 @@ def test_init_local_host_configuration_omits_vm_sizing(
         ]
     )
 
-    # Then only the host-relevant local option is reported
+    # Then only the host-relevant local options are reported
     options = json.loads(result.stdout)["infrastructure"]["options"]
-    assert set(options) == {"ports"}
+    assert set(options) == {"container-engine", "ports"}
     service, separator, raw_port = options["ports"].partition(":")
     assert service == "db"
     assert separator == ":"

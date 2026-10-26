@@ -268,7 +268,7 @@ func newDeploymentSidecars(
 	if kind != backendTypeLocal {
 		return nil, ErrSidecarsUnsupported
 	}
-	selected, err := newLocalRuntime(deployment, runtimeartifacts.FromContext(ctx))
+	selected, err := newLocalRuntime(ctx, deployment, runtimeartifacts.FromContext(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -944,7 +944,7 @@ func reconcileRunningSidecars(ctx context.Context, deployment config.DeploymentD
 	if !isLocalDeployment(deployment) {
 		return nil
 	}
-	selected, err := newLocalRuntime(deployment, runtimeartifacts.FromContext(ctx))
+	selected, err := newLocalRuntime(ctx, deployment, runtimeartifacts.FromContext(ctx))
 	if err != nil {
 		return err
 	}

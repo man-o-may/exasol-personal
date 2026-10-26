@@ -6,6 +6,18 @@ Notable user-facing changes to Exasol Personal are documented here.
 
 ### Added
 
+- Local deployments on Linux and Windows can run on Docker. The new `container_engine` option
+  accepts `auto` (the default), `docker`, or `podman`; `auto` uses Podman when it is installed,
+  and otherwise an installed Docker that runs Linux containers. The launcher never installs or
+  starts Docker. A deployment keeps the engine it first started on, deployments created by earlier
+  versions keep Podman, and `exasol diag local` reports the engine in use. Docker restarts a
+  running deployment's database and sidecars when its daemon starts again, for example after a
+  reboot, once the deployment has been started with `exasol start` after installation:
+
+  ```bash
+  exasol install local --container-engine docker
+  ```
+
 - `exasol connect` now creates a table from a local Parquet file, with columns taken from the file:
 
   ```bash
@@ -21,10 +33,11 @@ Notable user-facing changes to Exasol Personal are documented here.
   deployment start, stop, and destroy, reporting runtime and reconciliation
   status. Status clears recorded failures when live inspection verifies the
   desired outcome. Start reconciles edited definitions and reports sidecar
-  failures separately from database state. A sidecar that fails to start names
-  the cause and points at `exasol sidecar status <name>` for the full
-  diagnosis. Connection values reach containers through an owner-readable file
-  the launcher removes once the container is created. macOS publishes a
+  failures separately from database state. Sidecars restart after any exit
+  unless their definition sets another `restartPolicy`. A sidecar that fails to
+  start names the cause and points at `exasol sidecar status <name>` for the
+  full diagnosis. Connection values reach containers through an owner-readable
+  file the launcher removes once the container is created. macOS publishes a
   declared host port through the local runner's live forwarding. Cloud
   deployments report that sidecars are unsupported for their type. Status
   reports a complete URL for a published port that declares an application
@@ -44,6 +57,10 @@ Notable user-facing changes to Exasol Personal are documented here.
   port-conflict, deployment-lock, and cloud authentication problems.
 
 ### Changed
+
+- New local deployments on Windows hosts that have Docker but not Podman run on Docker instead of
+  asking to install Podman. Run `exasol install local --container-engine podman` to install and
+  use Podman instead.
 
 - `--tofu-update-lockfile` is now offered only by deployments whose infrastructure preset uses the OpenTofu backend. It stays available for OpenTofu-backed `exasol install` and `exasol deploy`, is no longer listed in the help of a local preset or deployment, and is rejected with an error naming the preset when passed to one.
 

@@ -198,7 +198,7 @@ func (container Container) Clone() Container {
 func (container Container) Defaults() Container {
 	container = container.Clone()
 	if container.RestartPolicy == "" {
-		container.RestartPolicy = OnFailure
+		container.RestartPolicy = Always
 	}
 	if container.ImagePullPolicy == "" {
 		container.ImagePullPolicy = IfNotPresent

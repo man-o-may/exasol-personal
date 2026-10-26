@@ -17,10 +17,12 @@ A local database always runs as a single node. Platform-specific requirements ar
 
 - **macOS:** macOS 15 Sequoia or later on Apple Silicon with at least 8 GB of host memory. The
   launcher supplies Podman in a managed virtual machine.
-- **Linux:** AMD64 or ARM64 with Podman installed and available in `PATH`. The database uses host
+- **Linux:** AMD64 or ARM64 with Docker or Podman installed and available in `PATH`. Docker must be
+  recent enough to mount container images (verified with Docker Engine 29). The database uses host
   resources directly.
-- **Windows:** Windows 10 or later on AMD64, Windows Package Manager (`winget`), and the prerequisites
-  for a Podman machine. Windows on ARM64 is not supported for local deployments.
+- **Windows:** Windows 10 or later on AMD64, with Docker Desktop running Linux containers, or with
+  Windows Package Manager (`winget`) and the prerequisites for a Podman machine. Windows on ARM64 is
+  not supported for local deployments.
 
 ## Cloud database
 

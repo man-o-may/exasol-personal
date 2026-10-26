@@ -583,6 +583,21 @@ func TestPodmanInstallStartClassifiesBindDiagnostic(t *testing.T) {
 	}
 }
 
+// Regression: Docker Desktop reported a port conflict only as `exit status 125`.
+func TestPodmanInstallStart_ReportsTheEngineErrorOfAFailedRun(t *testing.T) {
+	t.Parallel()
+	skipPodmanInstallTestOnWindows(t)
+
+	install, startConfig, fixture := newPodmanInstallFixture(t)
+	writeTestFile(t, filepath.Join(fixture.scenarioDir, "fail"), "run")
+
+	err := install.Start(context.Background(), nil, nil, startConfig)
+
+	if err == nil || !strings.Contains(err.Error(), "fake run failure") {
+		t.Fatalf("expected the engine's error in the failure, got %v", err)
+	}
+}
+
 func TestPodmanInstallStartDoesNotClassifyVMInternalBindFailure(t *testing.T) {
 	t.Parallel()
 	skipPodmanInstallTestOnWindows(t)
@@ -696,54 +711,54 @@ func TestPodmanInstallStart_RejectsInvalidConfigurationBeforePodman(t *testing.T
 
 	tests := []struct {
 		name   string
-		mutate func(*PodmanInstall, *StartConfig)
+		mutate func(*NanoInstall, *StartConfig)
 	}{
 		{
 			name:   "published port",
-			mutate: func(_ *PodmanInstall, config *StartConfig) { config.ContainerDBPort = 65536 },
+			mutate: func(_ *NanoInstall, config *StartConfig) { config.ContainerDBPort = 65536 },
 		},
 		{
 			name: "data directory",
-			mutate: func(_ *PodmanInstall, config *StartConfig) {
+			mutate: func(_ *NanoInstall, config *StartConfig) {
 				config.DataDir = " "
 			},
 		},
 		{
 			name: "enabled version-check URL",
-			mutate: func(_ *PodmanInstall, config *StartConfig) {
+			mutate: func(_ *NanoInstall, config *StartConfig) {
 				config.VersionCheck = validTestVersionCheckConfig()
 				config.VersionCheck.URL = ""
 			},
 		},
 		{
 			name: "enabled version-check identity",
-			mutate: func(_ *PodmanInstall, config *StartConfig) {
+			mutate: func(_ *NanoInstall, config *StartConfig) {
 				config.VersionCheck = validTestVersionCheckConfig()
 				config.VersionCheck.Identity = ""
 			},
 		},
 		{
 			name: "enabled version-check operating system",
-			mutate: func(_ *PodmanInstall, config *StartConfig) {
+			mutate: func(_ *NanoInstall, config *StartConfig) {
 				config.VersionCheck = validTestVersionCheckConfig()
 				config.VersionCheck.OperatingSystem = ""
 			},
 		},
 		{
 			name: "SLC image",
-			mutate: func(_ *PodmanInstall, config *StartConfig) {
+			mutate: func(_ *NanoInstall, config *StartConfig) {
 				config.SLCs = []SLCConfig{{Target: "/exa/slc/python"}}
 			},
 		},
 		{
 			name: "SLC target",
-			mutate: func(_ *PodmanInstall, config *StartConfig) {
+			mutate: func(_ *NanoInstall, config *StartConfig) {
 				config.SLCs = []SLCConfig{{Image: "example.test/slc:latest"}}
 			},
 		},
 		{
 			name: "bootstrap directory for an initial password",
-			mutate: func(_ *PodmanInstall, config *StartConfig) {
+			mutate: func(_ *NanoInstall, config *StartConfig) {
 				config.InitialPassword = func(context.Context) (string, error) {
 					return testInitialPassword, nil
 				}
@@ -751,14 +766,14 @@ func TestPodmanInstallStart_RejectsInvalidConfigurationBeforePodman(t *testing.T
 		},
 		{
 			name: "SLC status path",
-			mutate: func(install *PodmanInstall, config *StartConfig) {
+			mutate: func(install *NanoInstall, config *StartConfig) {
 				config.SLCs = []SLCConfig{}
 				install.slcStatusPath.RuntimePath = " "
 			},
 		},
 		{
 			name: "SLC staging directory",
-			mutate: func(install *PodmanInstall, config *StartConfig) {
+			mutate: func(install *NanoInstall, config *StartConfig) {
 				config.SLCs = []SLCConfig{}
 				install.slcStagingDir.RuntimePath = " "
 			},
@@ -846,7 +861,7 @@ type podmanInstallFixture struct {
 	slcStatusPath string
 }
 
-func newPodmanInstallFixture(t *testing.T) (*PodmanInstall, StartConfig, podmanInstallFixture) {
+func newPodmanInstallFixture(t *testing.T) (*NanoInstall, StartConfig, podmanInstallFixture) {
 	t.Helper()
 
 	root := t.TempDir()

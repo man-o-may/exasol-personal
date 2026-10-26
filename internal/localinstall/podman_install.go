@@ -25,13 +25,14 @@ const (
 	nanoImageOverridePathEnv  = "EXASOL_LOCAL_NANO_IMAGE_OVERRIDE_PATH"
 	exasolNanoImageResourceID = "exasol-nano-image"
 	loadedImagePrefix         = "Loaded image:"
-	dataDirMode               = 0o750
-	nanoInternalDBPort        = 8563
-	nanoShmSize               = "512mb"
-	nanoPIDsLimit             = "-1"
-	// `unmask=ALL` and `label=disable` are required for UDFs to work, which need
-	// nested namespaces (at least user, mount and pid).
-	nanoSecurityOpt        = "unmask=ALL"
+	// Docker reports an image it could not tag by its ID instead.
+	loadedImageIDPrefix = "Loaded image ID:"
+	dataDirMode         = 0o750
+	nanoInternalDBPort  = 8563
+	nanoShmSize         = "512mb"
+	nanoPIDsLimit       = "-1"
+	// UDFs need nested namespaces (at least user, mount and pid), and SELinux
+	// labelling blocks them.
 	nanoSELinuxSecurityOpt = "label=disable"
 	// nanoBootstrapMountPath is where the first container sees the bootstrap
 	// directory holding the initial sys password.
@@ -48,9 +49,12 @@ const (
 	nanoVersionCheckMin      = 60
 	nanoVersionCheckMax      = 604800
 	nanoVersionCheckRetryMax = 86400
+	dataCleanupImage         = "docker.io/library/busybox:1.36.1@sha256:" +
+		"73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
+	dataCleanupMountPath = "/data"
 )
 
-type PodmanInstall struct {
+type NanoInstall struct {
 	deployment    config.DeploymentDir
 	environment   ExecutionEnvironment
 	client        ContainerRuntime
@@ -65,7 +69,7 @@ func NewPodmanInstall(
 	runtimeExec []string,
 	slcStagingDir string,
 	slcStatusPath string,
-) *PodmanInstall {
+) *NanoInstall {
 	directEnvironment := NewDirectExecutionEnvironment(runtimeExec)
 	resolveImage := func(ctx context.Context) (RuntimePath, error) {
 		path, err := ResolveNanoImage(ctx, manager)
@@ -76,18 +80,19 @@ func NewPodmanInstall(
 		return IdentityRuntimePath(path), nil
 	}
 
-	return NewPodmanInstallWithEnvironment(
+	return NewNanoInstall(
 		deployment,
 		directEnvironment,
 		resolveImage,
 		IdentityRuntimePath(slcStagingDir),
 		IdentityRuntimePath(slcStatusPath),
+		newPodmanRuntime(directEnvironment),
 	)
 }
 
 // ResolveNanoImage materializes the platform-specific image archive on the host.
-// Runtimes that execute Podman elsewhere can stage and map this host path before
-// passing it back to PodmanInstall.
+// Runtimes that execute the container engine elsewhere can stage and map this host path before
+// passing it back to NanoInstall.
 func ResolveNanoImage(
 	ctx context.Context,
 	manager *runtimeartifacts.Manager,
@@ -102,24 +107,27 @@ func ResolveNanoImage(
 	return manager.Request(ctx, exasolNanoImageResourceID)
 }
 
-func NewPodmanInstallWithEnvironment(
+// NewNanoInstall runs Nano through client, the deployment's container engine,
+// with commands and filesystem operations confined to environment.
+func NewNanoInstall(
 	deployment config.DeploymentDir,
 	environment ExecutionEnvironment,
 	resolveImage func(context.Context) (RuntimePath, error),
 	slcStagingDir RuntimePath,
 	slcStatusPath RuntimePath,
-) *PodmanInstall {
-	return &PodmanInstall{
+	client ContainerRuntime,
+) *NanoInstall {
+	return &NanoInstall{
 		deployment:    deployment,
 		environment:   environment,
-		client:        newPodmanRuntime(environment),
+		client:        client,
 		resolveImage:  resolveImage,
 		slcStagingDir: slcStagingDir,
 		slcStatusPath: slcStatusPath,
 	}
 }
 
-func (install *PodmanInstall) Start(
+func (install *NanoInstall) Start(
 	ctx context.Context,
 	out, outErr io.Writer,
 	startConfig StartConfig,
@@ -210,7 +218,7 @@ func (install *PodmanInstall) Start(
 			fmt.Errorf("failed to synchronize local runtime storage before starting Nano: %w", err))
 	}
 
-	services, err := NewSidecarRuntime(install.environment, containerName, RuntimePath{})
+	services, err := NewSidecarRuntime(install.client, containerName, RuntimePath{})
 	if err != nil {
 		return err
 	}
@@ -238,7 +246,8 @@ func (install *PodmanInstall) Start(
 		startErrOutput = io.MultiWriter(outErr, &startDiagnostic)
 	}
 	if err := install.client.Create(ctx, spec, out, startErrOutput); err != nil {
-		failure := fmt.Errorf("failed to start Nano container %s: %w", containerName, err)
+		failure := fmt.Errorf("failed to start Nano container %s: %w",
+			containerName, withEngineError(err, startDiagnostic.String()))
 		failure = classifyPodmanStartBindFailure(
 			ctx,
 			install,
@@ -283,7 +292,7 @@ func RemoveHostBootstrapPassword(hostBootstrapDir string) error {
 
 // RemoveBootstrapPassword deletes the initial password file from bootstrapDir.
 // It is safe to call when the file or directory does not exist.
-func (install *PodmanInstall) RemoveBootstrapPassword(
+func (install *NanoInstall) RemoveBootstrapPassword(
 	ctx context.Context,
 	bootstrapDir string,
 ) error {
@@ -298,9 +307,28 @@ func (install *PodmanInstall) RemoveBootstrapPassword(
 	return nil
 }
 
+// withEngineError adds the container engine's error output to err, because the
+// exit status alone does not name the cause.
+func withEngineError(err error, diagnostic string) error {
+	var lines []string
+	for line := range strings.SplitSeq(diagnostic, "\n") {
+		line = strings.TrimSpace(line)
+		// Docker follows its error with a pointer to the command's help.
+		if line == "" || strings.HasPrefix(line, "Run '") {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	if len(lines) == 0 {
+		return err
+	}
+
+	return fmt.Errorf("%w: %s", err, strings.Join(lines, "; "))
+}
+
 func classifyPodmanStartBindFailure(
 	ctx context.Context,
-	install *PodmanInstall,
+	install *NanoInstall,
 	outErr io.Writer,
 	containerName string,
 	startConfig StartConfig,
@@ -356,7 +384,8 @@ func nanoRunSpec(startConfig StartConfig, options nanoRunOptions) ContainerSpec 
 		Restart:          restartPolicy,
 		SharedMemorySize: nanoShmSize,
 		ProcessLimit:     nanoPIDsLimit,
-		SecurityOptions:  []string{nanoSecurityOpt, nanoSELinuxSecurityOpt},
+		NestedSandbox:    true,
+		SecurityOptions:  []string{nanoSELinuxSecurityOpt},
 		Ports:            []PortMapping{nanoDBPortMapping(startConfig)},
 		Mounts: []Mount{
 			{Kind: MountBind, Source: startConfig.DataDir, Target: nanoDataMountTarget},
@@ -403,7 +432,7 @@ func nanoRunSpec(startConfig StartConfig, options nanoRunOptions) ContainerSpec 
 	return spec
 }
 
-func (install *PodmanInstall) Stop(ctx context.Context, out, outErr io.Writer) error {
+func (install *NanoInstall) Stop(ctx context.Context, out, outErr io.Writer) error {
 	containerName, err := getContainerName(install.deployment)
 	if err != nil {
 		return err
@@ -415,7 +444,7 @@ func (install *PodmanInstall) Stop(ctx context.Context, out, outErr io.Writer) e
 	return nil
 }
 
-func (install *PodmanInstall) Status(
+func (install *NanoInstall) Status(
 	ctx context.Context,
 	_, outErr io.Writer,
 ) (*InstallStatus, error) {
@@ -431,7 +460,7 @@ func (install *PodmanInstall) Status(
 	return &InstallStatus{Running: running}, nil
 }
 
-func (install *PodmanInstall) Destroy(ctx context.Context, out, outErr io.Writer) error {
+func (install *NanoInstall) Destroy(ctx context.Context, out, outErr io.Writer) error {
 	if err := install.Stop(ctx, out, outErr); err != nil {
 		return err
 	}
@@ -439,7 +468,7 @@ func (install *PodmanInstall) Destroy(ctx context.Context, out, outErr io.Writer
 	if err != nil {
 		return err
 	}
-	services, err := NewSidecarRuntime(install.environment, owner, RuntimePath{})
+	services, err := NewSidecarRuntime(install.client, owner, RuntimePath{})
 	if err != nil {
 		return err
 	}
@@ -447,7 +476,24 @@ func (install *PodmanInstall) Destroy(ctx context.Context, out, outErr io.Writer
 	return services.RemoveNetwork(ctx)
 }
 
-func (install *PodmanInstall) writeBootstrapPassword(
+// ClearDataDir empties dataDir from inside a container, which can delete the
+// files a rootful engine created there that the launcher user cannot.
+func (install *NanoInstall) ClearDataDir(
+	ctx context.Context,
+	out, outErr io.Writer,
+	dataDir string,
+) error {
+	return install.client.RunToCompletion(ctx, ContainerSpec{
+		Image:           dataCleanupImage,
+		SecurityOptions: []string{nanoSELinuxSecurityOpt},
+		Mounts: []Mount{
+			{Kind: MountBind, Source: dataDir, Target: dataCleanupMountPath},
+		},
+		Args: []string{"find", dataCleanupMountPath, "-mindepth", "1", "-delete"},
+	}, out, outErr)
+}
+
+func (install *NanoInstall) writeBootstrapPassword(
 	ctx context.Context,
 	startConfig StartConfig,
 ) error {
@@ -468,7 +514,7 @@ func (install *PodmanInstall) writeBootstrapPassword(
 	return nil
 }
 
-func (install *PodmanInstall) adoptLegacyContainerName(
+func (install *NanoInstall) adoptLegacyContainerName(
 	ctx context.Context,
 	out, outErr io.Writer,
 	containerName string,
@@ -512,7 +558,7 @@ func (install *PodmanInstall) adoptLegacyContainerName(
 	return nil
 }
 
-func (install *PodmanInstall) failureWithDiagnostics(
+func (install *NanoInstall) failureWithDiagnostics(
 	ctx context.Context,
 	outErr io.Writer,
 	containerName string,
@@ -523,7 +569,7 @@ func (install *PodmanInstall) failureWithDiagnostics(
 	return failure
 }
 
-func (install *PodmanInstall) writePodmanDiagnostics(
+func (install *NanoInstall) writePodmanDiagnostics(
 	ctx context.Context,
 	outErr io.Writer,
 	containerName string,
@@ -542,7 +588,7 @@ func (install *PodmanInstall) writePodmanDiagnostics(
 	install.client.Diagnostics(diagnosticCtx, containerName, diagnosticOut)
 }
 
-func (install *PodmanInstall) validateStartConfig(startConfig StartConfig) error {
+func (install *NanoInstall) validateStartConfig(startConfig StartConfig) error {
 	if startConfig.ContainerDBPort <= 0 || startConfig.ContainerDBPort > 65535 {
 		return fmt.Errorf("invalid Nano published DB port %d", startConfig.ContainerDBPort)
 	}
@@ -607,7 +653,7 @@ func clamp(value, minimum, maximum int) int {
 	return min(max(value, minimum), maximum)
 }
 
-func (install *PodmanInstall) isFreshDeployment(
+func (install *NanoInstall) isFreshDeployment(
 	ctx context.Context,
 	dataDir string,
 ) (bool, error) {
@@ -620,7 +666,7 @@ func (install *PodmanInstall) isFreshDeployment(
 	return !exists, nil
 }
 
-func (install *PodmanInstall) containerRunning(
+func (install *NanoInstall) containerRunning(
 	ctx context.Context,
 	outErr io.Writer,
 	containerName string,
@@ -634,7 +680,7 @@ type podmanContainerStatus struct {
 	Running bool
 }
 
-func (install *PodmanInstall) containerExists(
+func (install *NanoInstall) containerExists(
 	ctx context.Context,
 	outErr io.Writer,
 	containerName string,
@@ -646,7 +692,7 @@ func (install *PodmanInstall) containerExists(
 
 // inspectContainerStatus asks podman's listing once rather than testing for
 // the container and then inspecting it.
-func (install *PodmanInstall) inspectContainerStatus(
+func (install *NanoInstall) inspectContainerStatus(
 	ctx context.Context,
 	outErr io.Writer,
 	containerName string,
@@ -666,7 +712,7 @@ func (install *PodmanInstall) inspectContainerStatus(
 	return podmanContainerStatus{}, nil
 }
 
-func (install *PodmanInstall) resolveImagePath(ctx context.Context) (RuntimePath, error) {
+func (install *NanoInstall) resolveImagePath(ctx context.Context) (RuntimePath, error) {
 	if install.resolveImage == nil {
 		return RuntimePath{}, errors.New("nano runtime artifact resolver is required")
 	}
