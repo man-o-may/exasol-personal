@@ -98,7 +98,7 @@ SHALL support literal values and `valueFrom.secretKeyRef` with `name`, `key`,
 and `optional`. Ports SHALL support `name`, `containerPort`, `hostPort`,
 `hostIP`, and TCP protocol. Image pull policies SHALL support `Always`,
 `IfNotPresent`, and `Never`. Restart policies SHALL support `Always`,
-`OnFailure`, and `Never`, defaulting to `OnFailure`.
+`OnFailure`, and `Never`, defaulting to `Always`.
 
 The launcher SHALL reject documents it cannot parse and documents carrying
 unsupported fields. It SHALL report unsupported values, duplicate environment
